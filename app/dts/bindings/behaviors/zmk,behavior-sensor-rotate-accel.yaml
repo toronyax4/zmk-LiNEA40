@@ -20,6 +20,9 @@ properties:
   tap-ms:
     type: int
     default: 20
+  direction-confirm-ms:
+    type: int
+    default: 75
   slow-interval-ms:
     type: int
     default: 120
