@@ -26,6 +26,7 @@ struct behavior_sensor_rotate_accel_config {
     struct zmk_behavior_binding cw_binding;
     struct zmk_behavior_binding ccw_binding;
     int tap_ms;
+    int direction_confirm_ms;
     int slow_interval_ms;
     int fast_interval_ms;
     int slow_scale_percent;
@@ -39,6 +40,9 @@ struct behavior_sensor_rotate_accel_data {
     struct zmk_behavior_binding active_binding;
     struct zmk_behavior_binding_event active_event;
     int active_scale_percent;
+    int active_direction;
+    int pending_direction;
+    int64_t pending_direction_ms;
     bool active;
 };
 
@@ -99,6 +103,7 @@ static void behavior_sensor_rotate_accel_release(struct k_work *work) {
     zmk_behavior_invoke_binding(&data->active_binding, data->active_event, false);
     data->active = false;
     data->active_scale_percent = 0;
+    data->active_direction = 0;
 }
 
 static int behavior_sensor_rotate_accel_init(const struct device *dev) {
@@ -114,16 +119,36 @@ static void behavior_sensor_rotate_accel_start(
     struct behavior_sensor_rotate_accel_data *data,
     const struct zmk_behavior_binding *binding,
     struct zmk_behavior_binding_event event,
-    int scale_percent) {
+    int scale_percent,
+    int direction) {
     if (data->active) {
-        if (scale_percent <= data->active_scale_percent) {
-            k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
-            return;
+        if (direction == data->active_direction) {
+            data->pending_direction = 0;
+            data->pending_direction_ms = 0;
+
+            if (scale_percent <= data->active_scale_percent) {
+                k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
+                return;
+            }
+        } else {
+            const int64_t now = k_uptime_get();
+
+            if (data->pending_direction != direction ||
+                now - data->pending_direction_ms > config->direction_confirm_ms) {
+                data->pending_direction = direction;
+                data->pending_direction_ms = now;
+                k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
+                return;
+            }
+
+            data->pending_direction = 0;
+            data->pending_direction_ms = 0;
         }
 
         zmk_behavior_invoke_binding(&data->active_binding, data->active_event, false);
         data->active = false;
         data->active_scale_percent = 0;
+        data->active_direction = 0;
     }
 
     data->active_binding = *binding;
@@ -135,6 +160,9 @@ static void behavior_sensor_rotate_accel_start(
 
     data->active = true;
     data->active_scale_percent = scale_percent;
+    data->active_direction = direction;
+    data->pending_direction = 0;
+    data->pending_direction_ms = 0;
     k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
 }
 
@@ -154,12 +182,15 @@ static int behavior_sensor_rotate_accel_process(
     int triggers = data->common.triggers[sensor_index][event.layer];
     struct zmk_behavior_binding triggered_binding;
     int scale_percent;
+    int direction;
 
     if (triggers > 0) {
+        direction = 1;
         triggered_binding = config->cw_binding;
         scale_percent = select_scale_percent(config, data, sensor_index, event.layer);
         triggered_binding.param1 = scale_movement(binding->param1, scale_percent, triggers);
     } else if (triggers < 0) {
+        direction = -1;
         triggers = -triggers;
         triggered_binding = config->ccw_binding;
         scale_percent = select_scale_percent(config, data, sensor_index, event.layer);
@@ -172,7 +203,8 @@ static int behavior_sensor_rotate_accel_process(
     event.source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL;
 #endif
 
-    behavior_sensor_rotate_accel_start(config, data, &triggered_binding, event, scale_percent);
+    behavior_sensor_rotate_accel_start(config, data, &triggered_binding, event, scale_percent,
+                                       direction);
 
     return ZMK_BEHAVIOR_OPAQUE;
 }
@@ -187,6 +219,7 @@ static const struct behavior_driver_api behavior_sensor_rotate_accel_driver_api 
         .cw_binding = {.behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE_BY_IDX(n, bindings, 0))},  \
         .ccw_binding = {.behavior_dev = DEVICE_DT_NAME(DT_INST_PHANDLE_BY_IDX(n, bindings, 1))}, \
         .tap_ms = DT_INST_PROP(n, tap_ms),                                                        \
+        .direction_confirm_ms = DT_INST_PROP(n, direction_confirm_ms),                        \
         .slow_interval_ms = DT_INST_PROP(n, slow_interval_ms),                                    \
         .fast_interval_ms = DT_INST_PROP(n, fast_interval_ms),                                    \
         .slow_scale_percent = DT_INST_PROP(n, slow_scale_percent),                                \
