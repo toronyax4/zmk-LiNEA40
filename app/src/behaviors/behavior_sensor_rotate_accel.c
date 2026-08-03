@@ -36,6 +36,7 @@ struct behavior_sensor_rotate_accel_config {
 struct behavior_sensor_rotate_accel_data {
     struct behavior_sensor_rotate_data common;
     int64_t last_trigger_ms[ZMK_KEYMAP_SENSORS_LEN][ZMK_KEYMAP_LAYERS_LEN];
+    uint8_t fast_trigger_streak[ZMK_KEYMAP_SENSORS_LEN][ZMK_KEYMAP_LAYERS_LEN];
     struct k_work_delayable release_work;
     struct zmk_behavior_binding active_binding;
     struct zmk_behavior_binding_event active_event;
@@ -52,19 +53,30 @@ static int select_scale_percent(const struct behavior_sensor_rotate_accel_config
                                 int layer) {
     const int64_t now = k_uptime_get();
     const int64_t last_trigger_ms = data->last_trigger_ms[sensor_index][layer];
+    uint8_t *fast_trigger_streak = &data->fast_trigger_streak[sensor_index][layer];
     int scale_percent = config->slow_scale_percent;
 
     if (last_trigger_ms != 0 && now - last_trigger_ms <= config->fast_interval_ms) {
-        scale_percent = config->fast_scale_percent;
-    } else if (last_trigger_ms != 0 && now - last_trigger_ms < config->slow_interval_ms &&
-               config->slow_interval_ms > config->fast_interval_ms) {
-        const int elapsed_ms = now - last_trigger_ms;
-        const int interval_span = config->slow_interval_ms - config->fast_interval_ms;
-        const int scale_span = config->slow_scale_percent - config->fast_scale_percent;
+        if (*fast_trigger_streak < 2) {
+            (*fast_trigger_streak)++;
+        }
 
-        scale_percent =
-            config->fast_scale_percent + (scale_span * (elapsed_ms - config->fast_interval_ms)) /
-                                             interval_span;
+        if (*fast_trigger_streak >= 2) {
+            scale_percent = config->fast_scale_percent;
+        }
+    } else {
+        *fast_trigger_streak = 0;
+
+        if (last_trigger_ms != 0 && now - last_trigger_ms < config->slow_interval_ms &&
+            config->slow_interval_ms > config->fast_interval_ms) {
+            const int elapsed_ms = now - last_trigger_ms;
+            const int interval_span = config->slow_interval_ms - config->fast_interval_ms;
+            const int scale_span = config->slow_scale_percent - config->fast_scale_percent;
+
+            scale_percent =
+                config->fast_scale_percent +
+                (scale_span * (elapsed_ms - config->fast_interval_ms)) / interval_span;
+        }
     }
 
     data->last_trigger_ms[sensor_index][layer] = now;
