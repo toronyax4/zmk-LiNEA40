@@ -29,6 +29,9 @@ properties:
   fast-interval-ms:
     type: int
     default: 25
+  fast-trigger-count:
+    type: int
+    default: 3
   slow-scale-percent:
     type: int
     default: 21
