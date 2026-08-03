@@ -38,18 +38,18 @@ struct behavior_sensor_rotate_accel_data {
     struct k_work_delayable release_work;
     struct zmk_behavior_binding active_binding;
     struct zmk_behavior_binding_event active_event;
+    int active_scale_percent;
     bool active;
 };
 
 static int select_scale_percent(const struct behavior_sensor_rotate_accel_config *config,
                                 struct behavior_sensor_rotate_accel_data *data, int sensor_index,
-                                int layer, int triggers) {
+                                int layer) {
     const int64_t now = k_uptime_get();
     const int64_t last_trigger_ms = data->last_trigger_ms[sensor_index][layer];
     int scale_percent = config->slow_scale_percent;
 
-    if (triggers > 1 || triggers < -1 ||
-        (last_trigger_ms != 0 && now - last_trigger_ms <= config->fast_interval_ms)) {
+    if (last_trigger_ms != 0 && now - last_trigger_ms <= config->fast_interval_ms) {
         scale_percent = config->fast_scale_percent;
     } else if (last_trigger_ms != 0 && now - last_trigger_ms < config->slow_interval_ms &&
                config->slow_interval_ms > config->fast_interval_ms) {
@@ -66,11 +66,25 @@ static int select_scale_percent(const struct behavior_sensor_rotate_accel_config
     return scale_percent;
 }
 
-static uint32_t scale_movement(uint32_t movement, int scale_percent) {
+static int16_t scale_axis_movement(int16_t axis, int scale_percent, int triggers) {
+    const int64_t scaled = ((int64_t)axis * scale_percent * triggers) / 100;
+
+    if (scaled > INT16_MAX) {
+        return INT16_MAX;
+    }
+    if (scaled < INT16_MIN) {
+        return INT16_MIN;
+    }
+
+    return (int16_t)scaled;
+}
+
+static uint32_t scale_movement(uint32_t movement, int scale_percent, int triggers) {
     const int16_t x = MOVE_X_DECODE(movement);
     const int16_t y = MOVE_Y_DECODE(movement);
 
-    return MOVE((x * scale_percent) / 100, (y * scale_percent) / 100);
+    return MOVE(scale_axis_movement(x, scale_percent, triggers),
+                scale_axis_movement(y, scale_percent, triggers));
 }
 
 static void behavior_sensor_rotate_accel_release(struct k_work *work) {
@@ -84,6 +98,7 @@ static void behavior_sensor_rotate_accel_release(struct k_work *work) {
 
     zmk_behavior_invoke_binding(&data->active_binding, data->active_event, false);
     data->active = false;
+    data->active_scale_percent = 0;
 }
 
 static int behavior_sensor_rotate_accel_init(const struct device *dev) {
@@ -98,10 +113,17 @@ static void behavior_sensor_rotate_accel_start(
     const struct behavior_sensor_rotate_accel_config *config,
     struct behavior_sensor_rotate_accel_data *data,
     const struct zmk_behavior_binding *binding,
-    struct zmk_behavior_binding_event event) {
+    struct zmk_behavior_binding_event event,
+    int scale_percent) {
     if (data->active) {
+        if (scale_percent <= data->active_scale_percent) {
+            k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
+            return;
+        }
+
         zmk_behavior_invoke_binding(&data->active_binding, data->active_event, false);
         data->active = false;
+        data->active_scale_percent = 0;
     }
 
     data->active_binding = *binding;
@@ -112,6 +134,7 @@ static void behavior_sensor_rotate_accel_start(
     }
 
     data->active = true;
+    data->active_scale_percent = scale_percent;
     k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
 }
 
@@ -130,18 +153,17 @@ static int behavior_sensor_rotate_accel_process(
 
     int triggers = data->common.triggers[sensor_index][event.layer];
     struct zmk_behavior_binding triggered_binding;
+    int scale_percent;
 
     if (triggers > 0) {
         triggered_binding = config->cw_binding;
-        triggered_binding.param1 =
-            scale_movement(binding->param1, select_scale_percent(config, data, sensor_index,
-                                                                  event.layer, triggers));
+        scale_percent = select_scale_percent(config, data, sensor_index, event.layer);
+        triggered_binding.param1 = scale_movement(binding->param1, scale_percent, triggers);
     } else if (triggers < 0) {
         triggers = -triggers;
         triggered_binding = config->ccw_binding;
-        triggered_binding.param1 =
-            scale_movement(binding->param2, select_scale_percent(config, data, sensor_index,
-                                                                  event.layer, -triggers));
+        scale_percent = select_scale_percent(config, data, sensor_index, event.layer);
+        triggered_binding.param1 = scale_movement(binding->param2, scale_percent, triggers);
     } else {
         return ZMK_BEHAVIOR_TRANSPARENT;
     }
@@ -150,7 +172,7 @@ static int behavior_sensor_rotate_accel_process(
     event.source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL;
 #endif
 
-    behavior_sensor_rotate_accel_start(config, data, &triggered_binding, event);
+    behavior_sensor_rotate_accel_start(config, data, &triggered_binding, event, scale_percent);
 
     return ZMK_BEHAVIOR_OPAQUE;
 }
