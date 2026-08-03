@@ -14,7 +14,7 @@
 
 #include <drivers/behavior.h>
 
-#include <zmk/behavior_queue.h>
+#include <zmk/behavior.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/virtual_key_position.h>
 
@@ -35,6 +35,10 @@ struct behavior_sensor_rotate_accel_config {
 struct behavior_sensor_rotate_accel_data {
     struct behavior_sensor_rotate_data common;
     int64_t last_trigger_ms[ZMK_KEYMAP_SENSORS_LEN][ZMK_KEYMAP_LAYERS_LEN];
+    struct k_work_delayable release_work;
+    struct zmk_behavior_binding active_binding;
+    struct zmk_behavior_binding_event active_event;
+    bool active;
 };
 
 static int select_scale_percent(const struct behavior_sensor_rotate_accel_config *config,
@@ -67,6 +71,48 @@ static uint32_t scale_movement(uint32_t movement, int scale_percent) {
     const int16_t y = MOVE_Y_DECODE(movement);
 
     return MOVE((x * scale_percent) / 100, (y * scale_percent) / 100);
+}
+
+static void behavior_sensor_rotate_accel_release(struct k_work *work) {
+    struct k_work_delayable *release_work = k_work_delayable_from_work(work);
+    struct behavior_sensor_rotate_accel_data *data =
+        CONTAINER_OF(release_work, struct behavior_sensor_rotate_accel_data, release_work);
+
+    if (!data->active) {
+        return;
+    }
+
+    zmk_behavior_invoke_binding(&data->active_binding, data->active_event, false);
+    data->active = false;
+}
+
+static int behavior_sensor_rotate_accel_init(const struct device *dev) {
+    struct behavior_sensor_rotate_accel_data *data = dev->data;
+
+    k_work_init_delayable(&data->release_work, behavior_sensor_rotate_accel_release);
+
+    return 0;
+}
+
+static void behavior_sensor_rotate_accel_start(
+    const struct behavior_sensor_rotate_accel_config *config,
+    struct behavior_sensor_rotate_accel_data *data,
+    const struct zmk_behavior_binding *binding,
+    struct zmk_behavior_binding_event event) {
+    if (data->active) {
+        zmk_behavior_invoke_binding(&data->active_binding, data->active_event, false);
+        data->active = false;
+    }
+
+    data->active_binding = *binding;
+    data->active_event = event;
+
+    if (zmk_behavior_invoke_binding(&data->active_binding, data->active_event, true) != 0) {
+        return;
+    }
+
+    data->active = true;
+    k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
 }
 
 static int behavior_sensor_rotate_accel_process(
@@ -104,10 +150,7 @@ static int behavior_sensor_rotate_accel_process(
     event.source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL;
 #endif
 
-    for (int i = 0; i < triggers; i++) {
-        zmk_behavior_queue_add(&event, triggered_binding, true, config->tap_ms);
-        zmk_behavior_queue_add(&event, triggered_binding, false, 0);
-    }
+    behavior_sensor_rotate_accel_start(config, data, &triggered_binding, event);
 
     return ZMK_BEHAVIOR_OPAQUE;
 }
@@ -128,7 +171,7 @@ static const struct behavior_driver_api behavior_sensor_rotate_accel_driver_api 
         .fast_scale_percent = DT_INST_PROP(n, fast_scale_percent),                                \
     };                                                                                            \
     static struct behavior_sensor_rotate_accel_data behavior_sensor_rotate_accel_data_##n = {};   \
-    BEHAVIOR_DT_INST_DEFINE(n, NULL, NULL, &behavior_sensor_rotate_accel_data_##n,               \
+    BEHAVIOR_DT_INST_DEFINE(n, behavior_sensor_rotate_accel_init, NULL, &behavior_sensor_rotate_accel_data_##n,               \
                             &behavior_sensor_rotate_accel_config_##n, POST_KERNEL,               \
                             CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,                                 \
                             &behavior_sensor_rotate_accel_driver_api);
