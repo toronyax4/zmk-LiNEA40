@@ -29,6 +29,7 @@ struct behavior_sensor_rotate_accel_config {
     int direction_confirm_ms;
     int slow_interval_ms;
     int fast_interval_ms;
+    int fast_trigger_count;
     int slow_scale_percent;
     int fast_scale_percent;
 };
@@ -54,14 +55,18 @@ static int select_scale_percent(const struct behavior_sensor_rotate_accel_config
     const int64_t now = k_uptime_get();
     const int64_t last_trigger_ms = data->last_trigger_ms[sensor_index][layer];
     uint8_t *fast_trigger_streak = &data->fast_trigger_streak[sensor_index][layer];
+    const uint8_t fast_trigger_count =
+        config->fast_trigger_count > 1 && config->fast_trigger_count <= UINT8_MAX
+            ? config->fast_trigger_count
+            : 2;
     int scale_percent = config->slow_scale_percent;
 
     if (last_trigger_ms != 0 && now - last_trigger_ms <= config->fast_interval_ms) {
-        if (*fast_trigger_streak < 2) {
+        if (*fast_trigger_streak < fast_trigger_count - 1) {
             (*fast_trigger_streak)++;
         }
 
-        if (*fast_trigger_streak >= 2) {
+        if (*fast_trigger_streak >= fast_trigger_count - 1) {
             scale_percent = config->fast_scale_percent;
         }
     } else {
@@ -248,6 +253,7 @@ static const struct behavior_driver_api behavior_sensor_rotate_accel_driver_api 
         .direction_confirm_ms = DT_INST_PROP(n, direction_confirm_ms),                        \
         .slow_interval_ms = DT_INST_PROP(n, slow_interval_ms),                                    \
         .fast_interval_ms = DT_INST_PROP(n, fast_interval_ms),                                    \
+        .fast_trigger_count = DT_INST_PROP(n, fast_trigger_count),                                \
         .slow_scale_percent = DT_INST_PROP(n, slow_scale_percent),                                \
         .fast_scale_percent = DT_INST_PROP(n, fast_scale_percent),                                \
     };                                                                                            \
