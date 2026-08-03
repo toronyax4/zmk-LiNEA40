@@ -41,6 +41,7 @@ struct behavior_sensor_rotate_accel_data {
     struct zmk_behavior_binding_event active_event;
     int active_scale_percent;
     int active_direction;
+    int confirmed_direction;
     int pending_direction;
     int64_t pending_direction_ms;
     bool active;
@@ -114,6 +115,32 @@ static int behavior_sensor_rotate_accel_init(const struct device *dev) {
     return 0;
 }
 
+static bool behavior_sensor_rotate_accel_confirm_direction(
+    const struct behavior_sensor_rotate_accel_config *config,
+    struct behavior_sensor_rotate_accel_data *data,
+    int direction) {
+    const int64_t now = k_uptime_get();
+
+    if (data->confirmed_direction == 0 || direction == data->confirmed_direction) {
+        data->confirmed_direction = direction;
+        data->pending_direction = 0;
+        data->pending_direction_ms = 0;
+        return true;
+    }
+
+    if (data->pending_direction == direction &&
+        now - data->pending_direction_ms <= config->direction_confirm_ms) {
+        data->confirmed_direction = direction;
+        data->pending_direction = 0;
+        data->pending_direction_ms = 0;
+        return true;
+    }
+
+    data->pending_direction = direction;
+    data->pending_direction_ms = now;
+    return false;
+}
+
 static void behavior_sensor_rotate_accel_start(
     const struct behavior_sensor_rotate_accel_config *config,
     struct behavior_sensor_rotate_accel_data *data,
@@ -122,27 +149,10 @@ static void behavior_sensor_rotate_accel_start(
     int scale_percent,
     int direction) {
     if (data->active) {
-        if (direction == data->active_direction) {
-            data->pending_direction = 0;
-            data->pending_direction_ms = 0;
-
-            if (scale_percent <= data->active_scale_percent) {
-                k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
-                return;
-            }
-        } else {
-            const int64_t now = k_uptime_get();
-
-            if (data->pending_direction != direction ||
-                now - data->pending_direction_ms > config->direction_confirm_ms) {
-                data->pending_direction = direction;
-                data->pending_direction_ms = now;
-                k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
-                return;
-            }
-
-            data->pending_direction = 0;
-            data->pending_direction_ms = 0;
+        if (direction == data->active_direction &&
+            scale_percent <= data->active_scale_percent) {
+            k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
+            return;
         }
 
         zmk_behavior_invoke_binding(&data->active_binding, data->active_event, false);
@@ -161,8 +171,6 @@ static void behavior_sensor_rotate_accel_start(
     data->active = true;
     data->active_scale_percent = scale_percent;
     data->active_direction = direction;
-    data->pending_direction = 0;
-    data->pending_direction_ms = 0;
     k_work_reschedule(&data->release_work, K_MSEC(config->tap_ms));
 }
 
@@ -183,21 +191,27 @@ static int behavior_sensor_rotate_accel_process(
     struct zmk_behavior_binding triggered_binding;
     int scale_percent;
     int direction;
+    uint32_t movement;
 
     if (triggers > 0) {
         direction = 1;
         triggered_binding = config->cw_binding;
-        scale_percent = select_scale_percent(config, data, sensor_index, event.layer);
-        triggered_binding.param1 = scale_movement(binding->param1, scale_percent, triggers);
+        movement = binding->param1;
     } else if (triggers < 0) {
         direction = -1;
         triggers = -triggers;
         triggered_binding = config->ccw_binding;
-        scale_percent = select_scale_percent(config, data, sensor_index, event.layer);
-        triggered_binding.param1 = scale_movement(binding->param2, scale_percent, triggers);
+        movement = binding->param2;
     } else {
         return ZMK_BEHAVIOR_TRANSPARENT;
     }
+
+    if (!behavior_sensor_rotate_accel_confirm_direction(config, data, direction)) {
+        return ZMK_BEHAVIOR_OPAQUE;
+    }
+
+    scale_percent = select_scale_percent(config, data, sensor_index, event.layer);
+    triggered_binding.param1 = scale_movement(movement, scale_percent, triggers);
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT)
     event.source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL;
